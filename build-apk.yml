@@ -1,0 +1,87 @@
+name: Build APK dari ZIP
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag rilis, mis. v1.0.0'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ekstrak proyek dari tp-offline-android.zip
+        run: unzip -oq tp-offline-android.zip
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Siapkan aset web offline (font + ZIP lib sudah di dalam repo)
+        run: |
+          npm --prefix tools install --no-audit --no-fund
+          node tools/prepare-web.mjs
+
+      - name: Tentukan versi
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+      - name: Siapkan keystore penandatangan
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KS_KEYPASS: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          KS="$RUNNER_TEMP/release.jks"
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$KS"
+            echo "KEYSTORE_PASSWORD=$KS_PASS" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=$KS_ALIAS" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=${KS_KEYPASS:-$KS_PASS}" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Secret KEYSTORE_BASE64 belum diatur. Memakai keystore sementara: rilis berikutnya tidak bisa dipasang menimpa rilis ini (harus uninstall dulu). Lihat README bagian 'Tanda tangan tetap'."
+            keytool -genkeypair -keystore "$KS" -storepass tpoffline -keypass tpoffline \
+              -alias tpoffline -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=TP Offline, O=PrinceRyy"
+            echo "KEYSTORE_PASSWORD=tpoffline" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=tpoffline" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=tpoffline" >> "$GITHUB_ENV"
+          fi
+          echo "KEYSTORE_FILE=$KS" >> "$GITHUB_ENV"
+
+      - name: Build APK
+        run: gradle assembleRelease -PversionName="$VERSION" -PversionCode="${{ github.run_number }}" --no-daemon
+
+      - name: Ganti nama APK
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk "dist/TP-Offline-${TAG}.apk"
+          ls -la dist
+
+      - name: Publikasikan ke GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: TP Offline ${{ env.TAG }}
+          files: dist/*.apk
+          generate_release_notes: true
